@@ -227,13 +227,24 @@ update_bashrc_verilator() {
     local version=$1
     local install_dir="$BASE_DIR/verilator_$version"
     
+    # Detect special version structure that requires VERILATOR_ROOT to point to share/verilator
+    local verilator_root_path="$install_dir"
+    if [ -f "$install_dir/share/verilator/bin/verilator" ] && [ -f "$install_dir/bin/verilator" ]; then
+        # This is a wrapper structure, check if the wrapper script points to share/verilator/bin
+        local wrapper_content=$(cat "$install_dir/bin/verilator")
+        if [[ "$wrapper_content" =~ \.\./share/verilator/bin ]] || [[ "$wrapper_content" =~ share/verilator/bin ]]; then
+            verilator_root_path="$install_dir/share/verilator"
+            echo -e "${YELLOW}Detected wrapper-style version, using share/verilator as VERILATOR_ROOT${NC}"
+        fi
+    fi
+    
     backup_bashrc
     
     # check if VERILATOR_ROOT is already set
     if grep -q "export VERILATOR_ROOT=" "$BASHRC_FILE" 2>/dev/null; then
         echo -e "${YELLOW}Updating existing VERILATOR_ROOT in .bashrc${NC}"
         # use sed to replace the existing VERILATOR_ROOT setting
-        sed -i.tmp "s|^export VERILATOR_ROOT=.*|export VERILATOR_ROOT=\"$install_dir\"|g" "$BASHRC_FILE"
+        sed -i.tmp "s|^export VERILATOR_ROOT=.*|export VERILATOR_ROOT=\"$verilator_root_path\"|g" "$BASHRC_FILE"
         # update the PATH with the verilator path
         if grep -q "VERILATOR_ROOT/bin" "$BASHRC_FILE"; then
             echo -e "${BLUE}VERILATOR_ROOT PATH already configured${NC}"
@@ -246,7 +257,7 @@ update_bashrc_verilator() {
         cat >> "$BASHRC_FILE" << BASHEOF
 
 # Verilator Configuration - Added by verilator switcher
-export VERILATOR_ROOT="$install_dir"
+export VERILATOR_ROOT="$verilator_root_path"
 export PATH="\$VERILATOR_ROOT/bin:\$PATH"
 BASHEOF
     fi
@@ -255,7 +266,7 @@ BASHEOF
     [ -f "$BASHRC_FILE.tmp" ] && rm -f "$BASHRC_FILE.tmp"
     
     echo -e "${GREEN}VERILATOR_ROOT updated in .bashrc to version $version${NC}"
-    echo -e "${CYAN}New VERILATOR_ROOT: $install_dir${NC}"
+    echo -e "${CYAN}New VERILATOR_ROOT: $verilator_root_path${NC}"
     return 0
 }
 
