@@ -5,7 +5,7 @@ set -e
 
 # Configuration
 BASE_DIR="/e/verilator_versions"
-REPO_URL="https://github.com/verilator/verilator.git/"
+REPO_URL="git@github.com:verilator/verilator.git"
 REPO_DIR="$BASE_DIR/verilator_repo"
 
 # Color output
@@ -41,10 +41,49 @@ setup_repo() {
     fi
 }
 
+# Function to setup missing dependencies
+setup_dependencies() {
+    log "Checking and setting up missing dependencies..."
+    
+    # Create missing FlexLexer.h header file
+    if [ ! -f "/usr/include/FlexLexer.h" ]; then
+        log "Creating missing FlexLexer.h header file..."
+        mkdir -p /usr/include
+        cat > /usr/include/FlexLexer.h << 'EOF'
+#ifndef __FLEX_LEXER_H
+#define __FLEX_LEXER_H
+#include <iostream>
+extern "C++" {
+class FlexLexer {
+public:
+    virtual ~FlexLexer() { }
+    const char* YYText() const { return yytext; }
+    int YYLeng() const { return yyleng; }
+    virtual int yylex() = 0;
+    virtual void switch_streams(std::istream* new_in = 0, std::ostream* new_out = 0) = 0;
+    int lineno() const { return yylineno; }
+    int debug() const { return yy_flex_debug; }
+    void set_debug(int flag) { yy_flex_debug = flag; }
+protected:
+    char* yytext;
+    int yyleng;
+    int yylineno;
+    int yy_flex_debug;
+};
+}
+#endif
+EOF
+        log "FlexLexer.h created successfully"
+    else
+        log "FlexLexer.h already exists"
+    fi
+}
+
 # Function to build a specific version
 build_version() {
     local version=$1
     local install_dir="$BASE_DIR/verilator_$version"
+    local build_log="$BASE_DIR/build_${version}.log"
     
     log "Building Verilator version: $version"
     
@@ -54,54 +93,79 @@ build_version() {
         return 0
     fi
     
+    # Setup dependencies before building
+    setup_dependencies
+    
     cd "$REPO_DIR"
     
     # Checkout the specific version
     log "Checking out version $version"
-    git checkout "$version" || {
+    if ! git checkout "$version" &> "$build_log"; then
         error "Failed to checkout version $version"
         return 1
-    }
+    fi
     
     # Clean previous build
     make distclean 2>/dev/null || true
     
     # Configure for this version
     log "Configuring build..."
-    autoconf
+    autoconf &> "$build_log"
     
-    # Set environment for MSYS2 compatibility
-    export PATH=/usr/bin:/mingw64/bin:$PATH
-    export CPPFLAGS="-I/usr/include"
+    # Enhanced MSYS2 environment setup
+    export PATH=/mingw64/bin:/usr/bin:$PATH
+    export CPPFLAGS="-I/mingw64/include -I/usr/include"
+    export LDFLAGS="-L/mingw64/lib -L/usr/lib"
+    export PKG_CONFIG_PATH="/mingw64/lib/pkgconfig:/usr/lib/pkgconfig"
+    export MSYSTEM=MINGW64
     
-    ./configure --prefix="$install_dir" || {
-        error "Configure failed for version $version"
+    if ! ./configure --prefix="$install_dir" &>> "$build_log"; then
+        error "Configure failed for version $version. Check $build_log"
         return 1
-    }
+    fi
     
     # Fix version generation if needed
     if [ -f "src/config_rev" ]; then
         python3 src/config_rev . > src/config_rev.h
     fi
     
-    # Build
+    # Build with verbose output and better error detection
     log "Compiling version $version..."
-    make -j$(nproc) || {
-        error "Build failed for version $version"
+    if ! make -j$(nproc) V=1 &>> "$build_log"; then
+        error "Build failed for version $version. Check $build_log for details"
+        # Check for specific linking issues
+        if grep -q "ld.*error\|undefined reference\|cannot find -l" "$build_log"; then
+            error "Linking errors detected in build log"
+        fi
         return 1
-    }
+    fi
+    
+    # Verify executables were actually created
+    if [ ! -f "bin/verilator_bin.exe" ] && [ ! -f "bin/verilator_bin" ]; then
+        error "Main executable not found after build"
+        return 1
+    fi
     
     # Install to version-specific directory
     log "Installing to $install_dir..."
-    make install || {
-        error "Install failed for version $version"
+    if ! make install &>> "$build_log"; then
+        error "Install failed for version $version. Check $build_log"
         return 1
-    }
+    fi
+    
+    # Verify installation
+    if [ ! -f "$install_dir/bin/verilator" ]; then
+        error "Installation verification failed - verilator executable not found"
+        return 1
+    fi
     
     # Create version info file
     echo "$version" > "$install_dir/VERSION"
     echo "Built on: $(date)" >> "$install_dir/VERSION"
     echo "Git commit: $(git rev-parse HEAD)" >> "$install_dir/VERSION"
+    
+    # Remove build log on success
+    rm -f "$build_log"
     
     log "Successfully built and installed Verilator $version"
 }
@@ -392,7 +456,7 @@ list_available_versions() {
     echo -e "${GREEN}Available Verilator versions:${NC}"
     local found=false
     for dir in "$BASE_DIR"/verilator_*; do
-        if [ -d "$dir" ] && [ -f "$dir/bin/verilator" ]; then
+        if [ -d "$dir" ] && [ -e "$dir/bin/verilator" ]; then
             local version=$(basename "$dir" | sed 's/verilator_//')
             local current_marker=""
             
@@ -420,15 +484,15 @@ list_available_versions() {
 switch_to_version() {
     local version=$1
     local install_dir="$BASE_DIR/verilator_$version"
-    
-    if [ ! -d "$install_dir" ]; then
+
+if [ ! -d "$install_dir" ]; then
         echo -e "${RED}Error: Version $version not found${NC}"
         echo ""
         list_available_versions
         return 1
-    fi
-    
-    if [ ! -f "$install_dir/bin/verilator" ]; then
+fi
+
+    if [ ! -e "$install_dir/bin/verilator" ]; then
         echo -e "${RED}Error: Verilator binary not found for version $version${NC}"
         echo -e "${YELLOW}Directory exists but installation appears incomplete${NC}"
         return 1
@@ -547,7 +611,7 @@ case "${1:-help}" in
                 switch_to_version "$1"
             else
                 echo -e "${YELLOW}Switch cancelled${NC}"
-            fi
+fi
         else
             show_help
         fi
@@ -625,3 +689,8 @@ case "${1:-help}" in
         echo "  $0 test v5.024"
         ;;
 esac
+
+
+
+
+
